@@ -11,6 +11,7 @@ import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryAction;
 import org.bukkit.event.inventory.PrepareItemCraftEvent;
+import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
@@ -97,8 +98,20 @@ public class CompressedItemListener implements Listener {
     }
 
     // ===================================================================
+    // 禁止丢弃压缩物品（避免数据丢失或拆分）
+    // ===================================================================
+
+    @EventHandler
+    public void onPlayerDropItem(PlayerDropItemEvent event) {
+        ItemStack dropped = event.getItemDrop().getItemStack();
+        if (CompressionGUI.isCompressed(dropped)) {
+            event.setCancelled(true);
+            event.getPlayer().sendMessage("§c压缩物品不能被丢弃！");
+        }
+    }
+
+    // ===================================================================
     // 阻止右键交互（工作台/箱子等）
-    // 但允许红石粉等非方块物品正常放置
     // ===================================================================
 
     @EventHandler
@@ -114,13 +127,11 @@ public class CompressedItemListener implements Listener {
 
         Material type = event.getClickedBlock().getType();
 
-        // 点击可交互方块 → 阻止（防止打开箱子/工作台）
         if (isInteractiveBlock(type)) {
             event.setCancelled(true);
             return;
         }
 
-        // 物品既不是方块也不是红石粉 → 阻止右键
         if (!item.getType().isBlock() && item.getType() != Material.REDSTONE) {
             event.setCancelled(true);
         }
