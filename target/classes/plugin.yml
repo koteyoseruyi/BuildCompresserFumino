@@ -1,0 +1,20 @@
+name: BuildCompresserFumino
+version: 1.0
+main: com.example.BuildCompresserFumino
+api-version: 1.21
+commands:
+  compress:
+    description: 打开压缩界面
+    usage: /compress
+    permission: buildcompresser.use
+  givecompressed:
+    description: 给予玩家压缩物品（管理员）
+    usage: /givecompressed <玩家> <物品> <数量>
+    permission: buildcompresser.admin
+permissions:
+  buildcompresser.use:
+    description: 允许使用压缩功能
+    default: true
+  buildcompresser.admin:
+    description: 管理员权限 - 使用给予压缩物品指令
+    default: op
