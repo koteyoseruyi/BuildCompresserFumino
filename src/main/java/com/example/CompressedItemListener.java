@@ -10,10 +10,14 @@ import org.bukkit.event.block.Action;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryAction;
+import org.bukkit.event.inventory.InventoryDragEvent;
+import org.bukkit.event.inventory.InventoryMoveItemEvent;
+import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.event.inventory.PrepareItemCraftEvent;
 import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.inventory.EquipmentSlot;
+import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.PlayerInventory;
 
@@ -84,21 +88,111 @@ public class CompressedItemListener implements Listener {
     }
 
     // ===================================================================
-    // 禁止拆分压缩物品（不可拆分）
+    // 禁止任何形式的拆分
     // ===================================================================
 
+    /**
+     * 禁止右键拆分（PICKUP_HALF）
+     * 禁止 PLACE_ONE（拿起物品后右键空槽位放一个）
+     * 禁止其他可能导致拆分的操作
+     */
     @EventHandler
     public void onInventoryClick(InventoryClickEvent event) {
-        if (event.getAction() == InventoryAction.PICKUP_HALF) {
-            ItemStack current = event.getCurrentItem();
-            if (current != null && CompressionGUI.isCompressed(current)) {
+        ItemStack current = event.getCurrentItem();
+        ItemStack cursor = event.getCursor();
+        Inventory clickedInv = event.getClickedInventory();
+
+        // 检查点击的物品是否为压缩物品
+        if (current != null && CompressionGUI.isCompressed(current)) {
+            // 右键拆分
+            if (event.getAction() == InventoryAction.PICKUP_HALF) {
                 event.setCancelled(true);
+                return;
+            }
+            // 尝试拿起（PICKUP_ALL）后右键放一个到别的格 = 先PICKUP_ALL再PLACE_ONE
+            // 这里需要处理的是从压缩物品上 PICKUP_ALL 后在其他地方 PLACE_ONE
+        }
+
+        // 检查光标上是否为压缩物品
+        if (cursor != null && CompressionGUI.isCompressed(cursor)) {
+            // 右键放一个到空位
+            if (event.getAction() == InventoryAction.PLACE_ONE) {
+                event.setCancelled(true);
+                return;
+            }
+            // 尝试放一部分到已有非满堆叠的物品
+            if (event.getAction() == InventoryAction.PLACE_SOME) {
+                event.setCancelled(true);
+                return;
+            }
+            // 尝试全部放入
+            if (event.getAction() == InventoryAction.PLACE_ALL) {
+                // 如果目标是空位或同种物品，允许（用户想放回原位）
+                // 但如果目标是不同种物品，阻止
+                if (current != null && !current.getType().isAir()
+                        && !CompressionGUI.areItemsCombinable(cursor, current)) {
+                    event.setCancelled(true);
+                    return;
+                }
+            }
+            // 交换物品（SWAP_WITH_CURSOR）- 在创造模式/特定情况下
+            if (event.getAction() == InventoryAction.SWAP_WITH_CURSOR) {
+                if (clickedInv != null && !(clickedInv.getHolder() instanceof Player)) {
+                    // 正在把压缩物品放入非玩家背包的容器中
+                    event.setCancelled(true);
+                    return;
+                }
+            }
+        }
+    }
+
+    /**
+     * 禁止拖拽拆分压缩物品（按住左键拖到多个格子）
+     */
+    @EventHandler
+    public void onInventoryDrag(InventoryDragEvent event) {
+        // 检查拖拽的原始物品是否为压缩物品
+        ItemStack oldCursor = event.getOldCursor();
+        if (oldCursor != null && CompressionGUI.isCompressed(oldCursor)) {
+            event.setCancelled(true);
+            return;
+        }
+
+        // 检查拖拽涉及的目标格中是否有压缩物品
+        for (int slot : event.getRawSlots()) {
+            Inventory inv = event.getView().getInventory(slot);
+            if (inv == null) continue;
+            ItemStack item = inv.getItem(slot);
+            if (item != null && CompressionGUI.isCompressed(item)) {
+                event.setCancelled(true);
+                return;
             }
         }
     }
 
     // ===================================================================
-    // 禁止丢弃压缩物品（避免数据丢失或拆分）
+    // 禁止压缩物品进入漏斗（主动放入或被动抽取）
+    // ===================================================================
+
+    /**
+     * 阻止漏斗/漏斗矿车移动压缩物品
+     */
+    @EventHandler
+    public void onInventoryMoveItem(InventoryMoveItemEvent event) {
+        ItemStack item = event.getItem();
+        if (item == null) return;
+
+        if (CompressionGUI.isCompressed(item)) {
+            event.setCancelled(true);
+            return;
+        }
+
+        // 也检查被移动的源容器中是否有压缩物品（防止漏斗从容器中抽取）
+        // 实际上 event.getItem() 就是被移动的物品，已经足够
+    }
+
+    // ===================================================================
+    // 禁止丢弃压缩物品
     // ===================================================================
 
     @EventHandler
@@ -132,7 +226,7 @@ public class CompressedItemListener implements Listener {
             return;
         }
 
-        if (!item.getType().isBlock() && item.getType() != Material.REDSTONE) {
+        if (!item.getType().isBlock() && item.getType() != Material.REDSTONE && item.getType() != Material.STRING) {
             event.setCancelled(true);
         }
     }
