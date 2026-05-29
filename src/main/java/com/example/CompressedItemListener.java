@@ -8,11 +8,13 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
+import org.bukkit.event.block.BlockDispenseEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryAction;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.inventory.InventoryMoveItemEvent;
+import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.event.inventory.PrepareItemCraftEvent;
 import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
@@ -25,6 +27,9 @@ import org.bukkit.inventory.PlayerInventory;
 import java.util.*;
 
 public class CompressedItemListener implements Listener {
+
+    /** 副手在 PlayerInventory 中的 slot 索引 */
+    private static final int OFFHAND_SLOT = 40;
 
     private final Map<UUID, PendingPlacement> pendingMap = new HashMap<>();
 
@@ -39,11 +44,18 @@ public class CompressedItemListener implements Listener {
         Player player = event.getPlayer();
         if (player.getGameMode() == GameMode.CREATIVE) return;
 
-        ItemStack hand = event.getItemInHand();
+        boolean isOffHand = event.getHand() == EquipmentSlot.OFF_HAND;
 
-        if (CompressionGUI.isCompressed(hand)) {
-            int slot = player.getInventory().getHeldItemSlot();
-            pendingMap.put(player.getUniqueId(), new PendingPlacement(hand.clone(), slot));
+        ItemStack placingItem;
+        if (isOffHand) {
+            placingItem = player.getInventory().getItemInOffHand();
+        } else {
+            placingItem = event.getItemInHand();
+        }
+
+        if (CompressionGUI.isCompressed(placingItem)) {
+            int slot = isOffHand ? OFFHAND_SLOT : player.getInventory().getHeldItemSlot();
+            pendingMap.put(player.getUniqueId(), new PendingPlacement(placingItem.clone(), slot));
             return;
         }
 
@@ -57,6 +69,12 @@ public class CompressedItemListener implements Listener {
             if (!CompressionGUI.isCompressed(item)) continue;
             pendingMap.put(player.getUniqueId(), new PendingPlacement(item.clone(), i));
             return;
+        }
+
+        // 检查副手
+        ItemStack offhand = inv.getItem(OFFHAND_SLOT);
+        if (offhand != null && offhand.getType() == type && CompressionGUI.isCompressed(offhand)) {
+            pendingMap.put(player.getUniqueId(), new PendingPlacement(offhand.clone(), OFFHAND_SLOT));
         }
     }
 
@@ -76,7 +94,11 @@ public class CompressedItemListener implements Listener {
         int newCount = oldCount - 1;
 
         if (newCount <= 0) {
-            player.getInventory().setItem(pending.slot(), null);
+            if (pending.slot() == OFFHAND_SLOT) {
+                player.getInventory().setItemInOffHand(null);
+            } else {
+                player.getInventory().setItem(pending.slot(), null);
+            }
             player.updateInventory();
             return;
         }
@@ -84,12 +106,17 @@ public class CompressedItemListener implements Listener {
         ItemStack newItem = CompressionGUI.createCompressedItem(
                 CompressionGUI.extractOriginal(pending.item()), newCount
         );
-        player.getInventory().setItem(pending.slot(), newItem);
+
+        if (pending.slot() == OFFHAND_SLOT) {
+            player.getInventory().setItemInOffHand(newItem);
+        } else {
+            player.getInventory().setItem(pending.slot(), newItem);
+        }
         player.updateInventory();
     }
 
     // ===================================================================
-    // 禁止任何形式的拆分
+    // 禁止任何形式的拆分 + 背包/储存容器内允许 Shift+点击移动
     // ===================================================================
 
     @EventHandler
@@ -99,13 +126,47 @@ public class CompressedItemListener implements Listener {
         Inventory clickedInv = event.getClickedInventory();
 
         if (current != null && CompressionGUI.isCompressed(current)) {
+            // ── 禁止右键拆分 ──
             if (event.getAction() == InventoryAction.PICKUP_HALF) {
                 event.setCancelled(true);
                 return;
             }
+
+            // ── Shift+点击处理 ──
+            if (event.getAction() == InventoryAction.MOVE_TO_OTHER_INVENTORY) {
+                Inventory topInv = event.getView().getTopInventory();
+                if (topInv.getHolder() instanceof Player) {
+                    return; // 背包界面，允许
+                }
+                if (isAllowedStorageContainer(topInv.getType())) {
+                    return; // 储存容器，允许
+                }
+                event.setCancelled(true); // 其他情况，禁止
+                return;
+            }
+
+            // ── ✨ 阻止从合成格取出压缩物品（防止拆分） ──
+            if (event.getSlotType() == InventoryType.SlotType.CRAFTING
+                    && clickedInv != null && !(clickedInv.getHolder() instanceof Player)) {
+                // 压缩物品在合成格中 → 阻止手动取出，自动归还到背包
+                event.setCancelled(true);
+                ItemStack item = current.clone();
+                // 用 InventoryView.setItem 清理合成格，不触发底层事件
+                event.getView().setItem(event.getRawSlot(), null);
+                Player player = (Player) event.getWhoClicked();
+                player.getInventory().addItem(item).forEach((id, left) ->
+                        player.getWorld().dropItem(player.getLocation(), left));
+                return;
+            }
         }
 
-        if (cursor != null && CompressionGUI.isCompressed(cursor)) {
+        // ── 阻止压缩物品被放入合成格 ──
+        if (cursor != null && !cursor.getType().isAir() && CompressionGUI.isCompressed(cursor)) {
+            if (event.getSlotType() == InventoryType.SlotType.CRAFTING) {
+                event.setCancelled(true);
+                return;
+            }
+
             if (event.getAction() == InventoryAction.PLACE_ONE) {
                 event.setCancelled(true);
                 return;
@@ -150,11 +211,23 @@ public class CompressedItemListener implements Listener {
     }
 
     // ===================================================================
-    // 禁止压缩物品进入漏斗
+    // 禁止压缩物品进入漏斗/漏斗矿车
     // ===================================================================
 
     @EventHandler
     public void onInventoryMoveItem(InventoryMoveItemEvent event) {
+        ItemStack item = event.getItem();
+        if (item != null && CompressionGUI.isCompressed(item)) {
+            event.setCancelled(true);
+        }
+    }
+
+    // ===================================================================
+    // 禁止投掷器/发射器弹出压缩物品
+    // ===================================================================
+
+    @EventHandler
+    public void onBlockDispense(BlockDispenseEvent event) {
         ItemStack item = event.getItem();
         if (item != null && CompressionGUI.isCompressed(item)) {
             event.setCancelled(true);
@@ -175,7 +248,7 @@ public class CompressedItemListener implements Listener {
     }
 
     // ===================================================================
-    // 禁止放入展示框（普通展示框 + 发光展示框）
+    // 禁止放入展示框
     // ===================================================================
 
     @EventHandler
@@ -194,7 +267,7 @@ public class CompressedItemListener implements Listener {
     }
 
     // ===================================================================
-    // 阻止右键交互（工作台/箱子/漏斗等）
+    // 阻止右键交互
     // ===================================================================
 
     @EventHandler
@@ -221,15 +294,41 @@ public class CompressedItemListener implements Listener {
     }
 
     // ===================================================================
-    // 阻止合成
+    // ✨ 最终修复：阻止合成 + 自动归还合成格中的压缩物品
+    // 使用 InventoryView.setItem 避免递归
     // ===================================================================
 
     @EventHandler
     public void onPrepareCraft(PrepareItemCraftEvent event) {
-        for (ItemStack item : event.getInventory().getMatrix()) {
+        var inv = event.getInventory();
+        boolean hasCompressed = false;
+        for (ItemStack item : inv.getMatrix()) {
             if (item != null && CompressionGUI.isCompressed(item)) {
-                event.getInventory().setResult(null);
-                return;
+                hasCompressed = true;
+                break;
+            }
+        }
+
+        if (!hasCompressed) return;
+
+        // 禁止合成
+        inv.setResult(null);
+
+        // ── 使用 InventoryView.setItem 从合成格清除压缩物品并归还玩家 ──
+        // InventoryView.setItem 修改的是客户端视图，不会通过
+        // TransientCraftingContainer.setItem 触发 slotsChanged，
+        // 因此不会产生递归 PrepareItemCraftEvent
+        Player player = (Player) event.getView().getPlayer();
+        var view = player.getOpenInventory();
+
+        for (int i = 0; i < inv.getMatrix().length; i++) {
+            ItemStack item = inv.getMatrix()[i];
+            if (item != null && CompressionGUI.isCompressed(item)) {
+                // 合成矩阵在 InventoryView 中从 raw slot 1 开始（slot 0 是合成结果）
+                int rawSlot = i + 1;
+                view.setItem(rawSlot, null);
+                player.getInventory().addItem(item).forEach((id, left) ->
+                        player.getWorld().dropItem(player.getLocation(), left));
             }
         }
     }
@@ -237,6 +336,12 @@ public class CompressedItemListener implements Listener {
     // ===================================================================
     // 辅助
     // ===================================================================
+
+    private boolean isAllowedStorageContainer(InventoryType type) {
+        return type == InventoryType.CHEST
+                || type == InventoryType.BARREL
+                || type == InventoryType.SHULKER_BOX;
+    }
 
     private boolean isInteractiveBlock(Material type) {
         return switch (type) {
@@ -260,4 +365,5 @@ public class CompressedItemListener implements Listener {
             default -> false;
         };
     }
+
 }

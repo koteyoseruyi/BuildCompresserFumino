@@ -1,5 +1,5 @@
 name: BuildCompresserFumino
-version: 1.1.1
+version: 2.0
 main: com.example.BuildCompresserFumino
 api-version: 1.21
 commands:
